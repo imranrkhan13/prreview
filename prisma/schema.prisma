@@ -1,0 +1,224 @@
+// Prisma schema for PR Preview Platform
+// Target: Neon (serverless Postgres). Works with any standard Postgres too.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id           String   @id @default(cuid())
+  githubOrgId  BigInt   @unique
+  name         String
+  apiKeyHash   String   @unique // sha256 of the org's automation API key; raw key is shown once at creation. NOT the primary dashboard auth mechanism anymore -- see Membership.
+  createdAt    DateTime @default(now())
+
+  repositories Repository[]
+  memberships  Membership[]
+
+  @@map("organizations")
+}
+
+// A GitHub-authenticated dashboard user. Deliberately holds no direct org
+// reference -- a user's org access is entirely determined by their
+// Membership rows, since one person can belong to multiple orgs (e.g. they
+// install the GitHub App for their own account AND a company org).
+model User {
+  id           String   @id @default(cuid())
+  githubUserId BigInt   @unique
+  login        String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+
+  memberships  Membership[]
+
+  @@map("users")
+}
+
+// The authorization join table: EVERY dashboard authorization check for
+// org-scoped data goes through this table, never through a client-supplied
+// orgId. See src/lib/auth/membership.ts.
+model Membership {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id])
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id])
+  role      Role         @default(MEMBER)
+  createdAt DateTime     @default(now())
+
+  @@unique([userId, orgId])
+  @@index([userId])
+  @@index([orgId])
+  @@map("memberships")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// A session token is a signed (HMAC), stateless bearer token containing
+// {userId, sid, iat, exp} -- see src/lib/auth/session.ts. This table exists
+// ONLY to support "logout invalidates this session": logout inserts the
+// token's `sid` here, and the auth middleware checks it on every request.
+// Expired rows can be swept periodically; a token past its own `exp` claim
+// is already rejected without a DB lookup.
+model RevokedSession {
+  sid       String   @id
+  revokedAt DateTime @default(now())
+  expiresAt DateTime // mirrors the token's own exp claim, for cleanup
+
+  @@index([expiresAt])
+  @@map("revoked_sessions")
+}
+
+// Short-lived, single-use code exchanged by the frontend for a real session
+// token after the OAuth callback redirect -- keeps the actual bearer token
+// out of the URL bar/browser history. See "GitHub OAuth flow" in README.
+model OneTimeExchangeCode {
+  code      String    @id
+  userId    String
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  @@index([expiresAt])
+  @@map("one_time_exchange_codes")
+}
+
+// ---------------------------------------------------------------------------
+// Repositories & access control
+// ---------------------------------------------------------------------------
+
+model Repository {
+  id             String   @id @default(cuid())
+  orgId          String
+  org            Organization @relation(fields: [orgId], references: [id])
+  githubRepoId   BigInt   @unique
+  fullName       String   // e.g. "acme/api"
+  installationId BigInt   // GitHub App installation ID
+  allowed        Boolean  @default(false) // explicit opt-in required before previews run
+  allowForkPrs   Boolean  @default(false) // if false, PRs from forks are held for manual approval
+  defaultProvider ProviderType @default(LOCAL_DOCKER) // LOCAL_DOCKER = private/local demo, RAILWAY = real public URL
+  secretAllowlist String[] @default([]) // names of env vars (resolved from the OPERATOR's own process.env) allowed into this repo's previews. Empty by default — no secrets flow into previews unless explicitly listed here.
+  previewAuthRequired Boolean @default(false) // if true, dashboard flags this repo's preview URLs as sensitive; see README "Preview URL sensitivity" for the current (partial) enforcement
+  webhookSecretRef String  // reference/name of secret in secret store, never the raw secret
+  createdAt      DateTime @default(now())
+
+  pullRequests   PullRequest[]
+
+  @@index([orgId])
+  @@map("repositories")
+}
+
+// ---------------------------------------------------------------------------
+// Pull requests & deployments
+// ---------------------------------------------------------------------------
+
+model PullRequest {
+  id             String   @id @default(cuid())
+  repoId         String
+  repo           Repository @relation(fields: [repoId], references: [id])
+  githubPrNumber Int
+  title          String
+  authorLogin    String
+  isFork         Boolean  @default(false)
+  needsApproval  Boolean  @default(false) // true when isFork && !repo.allowForkPrs; blocks auto-deploy
+  baseSha        String
+  headSha        String
+  state          PrState  @default(OPEN)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  deployments    Deployment[]
+
+  @@unique([repoId, githubPrNumber])
+  @@index([repoId])
+  @@map("pull_requests")
+}
+
+enum PrState {
+  OPEN
+  CLOSED
+  MERGED
+}
+
+model Deployment {
+  id             String   @id @default(cuid())
+  prId           String
+  pr             PullRequest @relation(fields: [prId], references: [id])
+  provider       ProviderType
+  status         DeploymentStatus @default(QUEUED)
+  url            String?
+  commitSha      String
+  failureReason  String?
+  demoMode       Boolean  @default(true) // surfaced in UI; false only for a real cloud provider run
+  healthCheckAttempts Int  @default(0)
+  lastHealthCheckAt   DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  events         DeploymentEvent[]
+
+  @@index([prId])
+  @@index([status])
+  @@map("deployments")
+}
+
+enum ProviderType {
+  LOCAL_DOCKER
+  VERCEL
+  RAILWAY
+  RENDER
+  FLY_IO
+  KUBERNETES
+}
+
+enum DeploymentStatus {
+  QUEUED
+  PROVISIONING
+  DEPLOYING
+  HEALTH_CHECK
+  LIVE
+  UPDATING
+  FAILED
+  STOPPED
+  EXPIRED
+}
+
+model DeploymentEvent {
+  id           String   @id @default(cuid())
+  deploymentId String
+  deployment   Deployment @relation(fields: [deploymentId], references: [id])
+  type         String   // e.g. "state_change", "log", "error"
+  message      String
+  createdAt    DateTime @default(now())
+
+  @@index([deploymentId])
+  @@map("deployment_events")
+}
+
+// ---------------------------------------------------------------------------
+// Webhook idempotency
+// ---------------------------------------------------------------------------
+
+model WebhookDelivery {
+  id               String   @id @default(cuid())
+  githubDeliveryId String   @unique
+  eventType        String
+  payloadHash      String
+  processedAt      DateTime @default(now())
+
+  @@map("webhook_deliveries")
+}

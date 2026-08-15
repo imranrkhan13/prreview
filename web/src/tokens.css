@@ -1,0 +1,83 @@
+:root {
+  /* Color: technical, dark workspace — not the cream/terracotta or
+     near-black+neon defaults. A muted deep-navy surface with a cool blue
+     brand accent, and status colors reserved strictly for deployment
+     states so color always carries meaning, never decoration. */
+  --bg: #0b0e14;
+  --surface: #12151f;
+  --surface-raised: #171b28;
+  --border: #232838;
+  --text: #e6e8ec;
+  --text-muted: #8b93a7;
+  --text-faint: #545c70;
+  --brand: #5b8cff;
+  --brand-dim: #2c3a63;
+
+  --status-live: #3ecf8e;
+  --status-live-bg: #123024;
+  --status-provisioning: #f2b84b;
+  --status-provisioning-bg: #33280f;
+  --status-failed: #f2555a;
+  --status-failed-bg: #331417;
+  --status-stopped: #6b7280;
+  --status-stopped-bg: #1c1f28;
+
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+a {
+  color: var(--brand);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
